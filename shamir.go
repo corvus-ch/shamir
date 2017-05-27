@@ -1,11 +1,11 @@
 package shamir
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
 	"fmt"
-	mathrand "math/rand"
-	"time"
+	"io"
 )
 
 const (
@@ -40,7 +40,7 @@ func makePolynomial(intercept, degree uint8) (polynomial, error) {
 }
 
 // evaluate returns the value of the polynomial for the given x
-func (p *polynomial) evaluate(x uint8) uint8 {
+func (p *polynomial) evaluate(x byte) byte {
 	// Special case the origin
 	if x == 0 {
 		return p.coefficients[0]
@@ -145,12 +145,56 @@ func add(a, b uint8) uint8 {
 	return a ^ b
 }
 
-// Split takes an arbitrarily long secret and generates a `parts`
-// number of shares, `threshold` of which are required to reconstruct
-// the secret. The parts and threshold must be at least 2, and less
-// than 256. The returned shares are each one byte longer than the secret
-// as they attach a tag used to reconstruct the secret.
-func Split(secret []byte, parts, threshold int) ([][]byte, error) {
+type writer struct {
+	io.WriteCloser
+	writers      map[byte]io.Writer
+	threshold    int
+	bytesWritten int
+}
+
+func (w *writer) Write(p []byte) (int, error) {
+	n := 0
+	// Construct a random polynomial for each byte of the secret.
+	// Because we are using a field of size 256, we can only represent
+	// a single byte as the intercept of the polynomial, so we must
+	// use a new polynomial for each byte.
+	for _, val := range p {
+		p, err := makePolynomial(val, uint8(w.threshold-1))
+		if nil != err {
+			return n, fmt.Errorf("failed to generate polynomial: %v", err)
+		}
+
+		// Generate a `parts` number of (x,y) pairs
+		// We cheat by encoding the x value once as the final index,
+		// so that it only needs to be stored once.
+		for x, w := range w.writers {
+			y := p.evaluate(uint8(x) + 1)
+			_, err := w.Write([]byte{y})
+			if nil != err {
+				return n, fmt.Errorf("failed to write part: %v", err)
+			}
+		}
+		n++
+		w.bytesWritten += n
+	}
+
+	return n, nil
+}
+
+func (w *writer) Close() error {
+	if w.bytesWritten <= 0 {
+		return fmt.Errorf("cannot split an empty secret")
+	}
+	for x, writer := range w.writers {
+		_, err := writer.Write([]byte{x + 1})
+		if nil != err {
+			return fmt.Errorf("failed to write part: %v", err)
+		}
+	}
+	return nil
+}
+
+func NewWriter(parts, threshold int, factory func(x byte) (io.Writer, error)) (io.WriteCloser, error) {
 	// Sanity check the input
 	if parts < threshold {
 		return nil, fmt.Errorf("parts cannot be less than threshold")
@@ -161,44 +205,54 @@ func Split(secret []byte, parts, threshold int) ([][]byte, error) {
 	if threshold < 2 {
 		return nil, fmt.Errorf("threshold must be at least 2")
 	}
-	if threshold > 255 {
-		return nil, fmt.Errorf("threshold cannot exceed 255")
-	}
-	if len(secret) == 0 {
-		return nil, fmt.Errorf("cannot split an empty secret")
-	}
 
-	// Generate random list of x coordinates
-	mathrand.Seed(time.Now().UnixNano())
-	xCoordinates := mathrand.Perm(255)
+	result := writer{writers: make(map[byte]io.Writer, parts), threshold: threshold}
 
-	// Allocate the output array, initialize the final byte
-	// of the output with the offset. The representation of each
-	// output is {y1, y2, .., yN, x}.
-	out := make([][]byte, parts)
-	for idx := range out {
-		out[idx] = make([]byte, len(secret)+1)
-		out[idx][len(secret)] = uint8(xCoordinates[idx]) + 1
-	}
-
-	// Construct a random polynomial for each byte of the secret.
-	// Because we are using a field of size 256, we can only represent
-	// a single byte as the intercept of the polynomial, so we must
-	// use a new polynomial for each byte.
-	for idx, val := range secret {
-		p, err := makePolynomial(val, uint8(threshold-1))
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate polynomial: %v", err)
+	buf := make([]byte, 1)
+	for len(result.writers) < parts {
+		if _, err := rand.Read(buf); err != nil {
+			return nil, err
 		}
-
-		// Generate a `parts` number of (x,y) pairs
-		// We cheat by encoding the x value once as the final index,
-		// so that it only needs to be stored once.
-		for i := 0; i < parts; i++ {
-			x := uint8(xCoordinates[i]) + 1
-			y := p.evaluate(x)
-			out[i][idx] = y
+		if _, exists := result.writers[buf[0]]; exists {
+			continue
 		}
+		w, err := factory(buf[0])
+		if nil != err {
+			return nil, err
+		}
+		result.writers[buf[0]] = w
+	}
+
+	return &result, nil
+}
+
+// Split takes an arbitrarily long secret and generates a `parts`
+// number of shares, `threshold` of which are required to reconstruct
+// the secret. The parts and threshold must be at least 2, and less
+// than 256. The returned shares are each one byte longer than the secret
+// as they attach a tag used to reconstruct the secret.
+func Split(secret []byte, parts, threshold int) ([][]byte, error) {
+	buffers := make(map[byte]*bytes.Buffer, parts)
+	factory := func(x byte) (io.Writer, error) {
+		buffers[x] = &bytes.Buffer{}
+		return buffers[x], nil
+	}
+	s, err := NewWriter(parts, threshold, factory)
+	if nil != err {
+		return nil, fmt.Errorf("failed to initilize writer: %v", err)
+	}
+
+	if _, err := s.Write(secret); nil != err {
+		return nil, fmt.Errorf("failed to split secret: %v", err)
+	}
+
+	if err := s.Close(); nil != err {
+		return nil, fmt.Errorf("failed to close writer: %v", err)
+	}
+
+	var out [][]byte
+	for _, buf := range buffers {
+		out = append(out, buf.Bytes())
 	}
 
 	// Return the encoded secrets
