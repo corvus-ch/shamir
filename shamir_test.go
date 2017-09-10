@@ -23,10 +23,6 @@ func TestSplit_invalid(t *testing.T) {
 	if _, err := Split(secret, 10, 1); err == nil {
 		t.Fatalf("expect error")
 	}
-
-	if _, err := Split(nil, 3, 2); err == nil {
-		t.Fatalf("expect error")
-	}
 }
 
 func TestSplit(t *testing.T) {
@@ -42,7 +38,7 @@ func TestSplit(t *testing.T) {
 	}
 
 	for _, share := range out {
-		if len(share) != len(secret)+1 {
+		if len(share) != len(secret) {
 			t.Fatalf("bad: %v", out)
 		}
 	}
@@ -55,26 +51,18 @@ func TestCombine_invalid(t *testing.T) {
 	}
 
 	// Mis-match in length
-	parts := [][]byte{
-		[]byte("foo"),
-		[]byte("ba"),
+	parts := map[byte][]byte{
+		42: []byte("foo"),
+		24: []byte("ba"),
 	}
 	if _, err := Combine(parts); err == nil {
 		t.Fatalf("should err")
 	}
 
 	//Too short
-	parts = [][]byte{
-		[]byte("f"),
-		[]byte("b"),
-	}
-	if _, err := Combine(parts); err == nil {
-		t.Fatalf("should err")
-	}
-
-	parts = [][]byte{
-		[]byte("foo"),
-		[]byte("foo"),
+	parts = map[byte][]byte{
+		1: []byte(""),
+		2: []byte(""),
 	}
 	if _, err := Combine(parts); err == nil {
 		t.Fatalf("should err")
@@ -89,18 +77,30 @@ func TestCombine(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 
+	keys := make([]byte, len(out))
+
+	i := 0
+	for k := range out {
+		keys[i] = k
+		i++
+	}
+
 	// There is 5*4*3 possible choices,
 	// we will just brute force try them all
-	for i := 0; i < 5; i++ {
-		for j := 0; j < 5; j++ {
+	for i := uint8(0); i < 5; i++ {
+		for j := uint8(0); j < 5; j++ {
 			if j == i {
 				continue
 			}
-			for k := 0; k < 5; k++ {
+			for k := uint8(0); k < 5; k++ {
 				if k == i || k == j {
 					continue
 				}
-				parts := [][]byte{out[i], out[j], out[k]}
+				parts := map[byte][]byte{
+					keys[i]: out[keys[i]],
+					keys[j]: out[keys[j]],
+					keys[k]: out[keys[k]],
+				}
 				recomb, err := Combine(parts)
 				if err != nil {
 					t.Fatalf("err: %v", err)
@@ -188,9 +188,13 @@ func TestInterpolate_Rand(t *testing.T) {
 			t.Fatalf("err: %v", err)
 		}
 
-		x_vals := []uint8{1, 2, 3}
-		y_vals := []uint8{p.evaluate(1), p.evaluate(2), p.evaluate(3)}
-		out := interpolatePolynomial(x_vals, y_vals, 0)
+		pairs := []pair{
+			{x: 1, y: p.evaluate(1)},
+			{x: 2, y: p.evaluate(2)},
+			{x: 3, y: p.evaluate(3)},
+		}
+
+		out := interpolate(pairs, 0)
 		if out != uint8(i) {
 			t.Fatalf("Bad: %v %d", out, i)
 		}

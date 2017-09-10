@@ -8,12 +8,10 @@ import (
 	"io"
 )
 
-const (
-	// ShareOverhead is the byte size overhead of each share
-	// when using Split on a secret. This is caused by appending
-	// a one byte tag to the share.
-	ShareOverhead = 1
-)
+// an x/y pair
+type pair struct {
+	x, y byte
+}
 
 // polynomial represents a polynomial of arbitrary degree
 type polynomial struct {
@@ -56,26 +54,23 @@ func (p *polynomial) evaluate(x byte) byte {
 	return out
 }
 
-// interpolatePolynomial takes N sample points and returns
-// the value at a given x using a lagrange interpolation.
-func interpolatePolynomial(x_samples, y_samples []uint8, x uint8) uint8 {
-	limit := len(x_samples)
-	var result, basis uint8
-	for i := 0; i < limit; i++ {
-		basis = 1
-		for j := 0; j < limit; j++ {
-			if i == j {
-				continue
+// Lagrange interpolation
+//
+// Takes N sample points and returns the value at a given x using a lagrange interpolation.
+func interpolate(points []pair, x byte) (value byte) {
+	for i, a := range points {
+		weight := byte(1)
+		for j, b := range points {
+			if i != j {
+				top := x ^ b.x
+				bottom := a.x ^ b.x
+				factor := div(top, bottom)
+				weight = mult(weight, factor)
 			}
-			num := add(x, x_samples[j])
-			denom := add(x_samples[i], x_samples[j])
-			term := div(num, denom)
-			basis = mult(basis, term)
 		}
-		group := mult(y_samples[i], basis)
-		result = add(result, group)
+		value = value ^ mult(weight, a.y)
 	}
-	return result
+	return
 }
 
 // div divides two numbers in GF(2^8)
@@ -146,7 +141,7 @@ func add(a, b uint8) uint8 {
 }
 
 type writer struct {
-	io.WriteCloser
+	io.Writer
 	writers      map[byte]io.Writer
 	threshold    int
 	bytesWritten int
@@ -168,7 +163,7 @@ func (w *writer) Write(p []byte) (int, error) {
 		// We cheat by encoding the x value once as the final index,
 		// so that it only needs to be stored once.
 		for x, w := range w.writers {
-			y := p.evaluate(uint8(x) + 1)
+			y := p.evaluate(uint8(x))
 			_, err := w.Write([]byte{y})
 			if nil != err {
 				return n, fmt.Errorf("failed to write part: %v", err)
@@ -181,20 +176,7 @@ func (w *writer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (w *writer) Close() error {
-	if w.bytesWritten <= 0 {
-		return fmt.Errorf("cannot split an empty secret")
-	}
-	for x, writer := range w.writers {
-		_, err := writer.Write([]byte{x + 1})
-		if nil != err {
-			return fmt.Errorf("failed to write part: %v", err)
-		}
-	}
-	return nil
-}
-
-func NewWriter(parts, threshold int, factory func(x byte) (io.Writer, error)) (io.WriteCloser, error) {
+func NewWriter(parts, threshold int, factory func(x byte) (io.Writer, error)) (io.Writer, error) {
 	// Sanity check the input
 	if parts < threshold {
 		return nil, fmt.Errorf("parts cannot be less than threshold")
@@ -231,7 +213,7 @@ func NewWriter(parts, threshold int, factory func(x byte) (io.Writer, error)) (i
 // the secret. The parts and threshold must be at least 2, and less
 // than 256. The returned shares are each one byte longer than the secret
 // as they attach a tag used to reconstruct the secret.
-func Split(secret []byte, parts, threshold int) ([][]byte, error) {
+func Split(secret []byte, parts, threshold int) (map[byte][]byte, error) {
 	buffers := make(map[byte]*bytes.Buffer, parts)
 	factory := func(x byte) (io.Writer, error) {
 		buffers[x] = &bytes.Buffer{}
@@ -246,13 +228,9 @@ func Split(secret []byte, parts, threshold int) ([][]byte, error) {
 		return nil, fmt.Errorf("failed to split secret: %v", err)
 	}
 
-	if err := s.Close(); nil != err {
-		return nil, fmt.Errorf("failed to close writer: %v", err)
-	}
-
-	var out [][]byte
-	for _, buf := range buffers {
-		out = append(out, buf.Bytes())
+	out := make(map[byte][]byte, parts)
+	for x, buf := range buffers {
+		out[x] = buf.Bytes()
 	}
 
 	// Return the encoded secrets
@@ -261,54 +239,39 @@ func Split(secret []byte, parts, threshold int) ([][]byte, error) {
 
 // Combine is used to reverse a Split and reconstruct a secret
 // once a `threshold` number of parts are available.
-func Combine(parts [][]byte) ([]byte, error) {
+func Combine(parts map[byte][]byte) ([]byte, error) {
 	// Verify enough parts provided
 	if len(parts) < 2 {
 		return nil, fmt.Errorf("less than two parts cannot be used to reconstruct the secret")
 	}
 
 	// Verify the parts are all the same length
-	firstPartLen := len(parts[0])
-	if firstPartLen < 2 {
-		return nil, fmt.Errorf("parts must be at least two bytes")
+	var firstPartLen int
+	for x := range parts {
+		firstPartLen = len(parts[x])
+		break
 	}
-	for i := 1; i < len(parts); i++ {
-		if len(parts[i]) != firstPartLen {
+	if firstPartLen < 1 {
+		return nil, fmt.Errorf("parts must be at least one byte long")
+	}
+	for _, part := range parts {
+		if len(part) != firstPartLen {
 			return nil, fmt.Errorf("all parts must be the same length")
 		}
 	}
 
 	// Create a buffer to store the reconstructed secret
-	secret := make([]byte, firstPartLen-1)
+	secret := make([]byte, firstPartLen)
+	points := make([]pair, len(parts))
 
-	// Buffer to store the samples
-	x_samples := make([]uint8, len(parts))
-	y_samples := make([]uint8, len(parts))
-
-	// Set the x value for each sample and ensure no x_sample values are the same,
-	// otherwise div() can be unhappy
-	checkMap := map[byte]bool{}
-	for i, part := range parts {
-		samp := part[firstPartLen-1]
-		if exists := checkMap[samp]; exists {
-			return nil, fmt.Errorf("duplicate part detected")
+	for i := range secret {
+		p := 0
+		for k, v := range parts {
+			points[p] = pair{x: k, y: v[i]}
+			p++
 		}
-		checkMap[samp] = true
-		x_samples[i] = samp
+		secret[i] = interpolate(points, 0)
 	}
 
-	// Reconstruct each byte
-	for idx := range secret {
-		// Set the y value for each sample
-		for i, part := range parts {
-			y_samples[i] = part[idx]
-		}
-
-		// Interpolte the polynomial and compute the value at 0
-		val := interpolatePolynomial(x_samples, y_samples, 0)
-
-		// Evaluate the 0th value to get the intercept
-		secret[idx] = val
-	}
 	return secret, nil
 }
