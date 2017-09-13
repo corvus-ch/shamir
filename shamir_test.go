@@ -2,6 +2,7 @@ package shamir
 
 import (
 	"bytes"
+	"io"
 	"testing"
 )
 
@@ -109,6 +110,25 @@ func TestCombine(t *testing.T) {
 				if !bytes.Equal(recomb, secret) {
 					t.Errorf("parts: (i:%d, j:%d, k:%d) %v", i, j, k, parts)
 					t.Fatalf("bad: %v %v", recomb, secret)
+				}
+
+				readers := map[byte]io.Reader{
+					keys[i]: bytes.NewReader(out[keys[i]]),
+					keys[j]: bytes.NewReader(out[keys[j]]),
+					keys[k]: bytes.NewReader(out[keys[k]]),
+				}
+
+				r, err := NewReader(readers)
+				if nil != err {
+					t.Errorf("failed to create reader: %v", err)
+				}
+				recomb2 := make([]byte, len(secret))
+				if _, err := r.Read(recomb2); nil != err {
+					t.Errorf("failed to combine secret: %v", err)
+				}
+				if !bytes.Equal(recomb2, secret) {
+					t.Errorf("parts: (i:%d, j:%d, k:%d) %v", i, j, k, parts)
+					t.Fatalf("bad: %v %v", recomb2, secret)
 				}
 			}
 		}
