@@ -201,15 +201,15 @@ func NewWriter(parts, threshold int, factory func(x byte) (io.Writer, error)) (i
 			// We cannot use a zero x coordinate otherwise the y values would be the intercepts i.e. the secret value itself.
 			continue
 		}
-		if _, exists := result.writers[buf[0]]; exists {
+		if _, exists := result.writers[x]; exists {
 			continue
 		}
 
-		w, err := factory(buf[0])
+		w, err := factory(x)
 		if nil != err {
 			return nil, err
 		}
-		result.writers[buf[0]] = w
+		result.writers[x] = w
 	}
 
 	return &result, nil
