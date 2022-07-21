@@ -195,9 +195,16 @@ func NewWriter(parts, threshold int, factory func(x byte) (io.Writer, error)) (i
 		if _, err := rand.Read(buf); err != nil {
 			return nil, err
 		}
+		x := buf[0]
+
+		if x == 0 {
+			// We cannot use a zero x coordinate otherwise the y values would be the intercepts i.e. the secret value itself.
+			continue
+		}
 		if _, exists := result.writers[buf[0]]; exists {
 			continue
 		}
+
 		w, err := factory(buf[0])
 		if nil != err {
 			return nil, err

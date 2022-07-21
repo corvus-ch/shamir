@@ -26,6 +26,23 @@ func TestSplit_invalid(t *testing.T) {
 	}
 }
 
+func TestSplit_noZeroCoordinate(t *testing.T) {
+	secret := []byte("test")
+
+	for i := 0; i < 1000; i++ {
+		out, err := Split(secret, 5, 3)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+
+		for x, _ := range out {
+			if x == 0 {
+				t.Fatal("found zero coordinate, the values therefore reveal the secret")
+			}
+		}
+	}
+}
+
 func TestSplit(t *testing.T) {
 	secret := []byte("test")
 
@@ -36,6 +53,25 @@ func TestSplit(t *testing.T) {
 
 	if len(out) != 5 {
 		t.Fatalf("bad: %v", out)
+	}
+
+	for _, share := range out {
+		if len(share) != len(secret) {
+			t.Fatalf("bad: %v", out)
+		}
+	}
+}
+
+func TestSplit_large(t *testing.T) {
+	secret := []byte("test")
+
+	out, err := Split(secret, 255, 255)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	if len(out) != 255 {
+		t.Fatalf("wrong number of shards: %v", out)
 	}
 
 	for _, share := range out {
