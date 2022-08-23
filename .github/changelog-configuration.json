@@ -1,0 +1,13 @@
+{
+  "pr_template": "- ${{TITLE}} #${{NUMBER}}",
+  "categories": [
+    {
+      "title": "## 🚀 Improvements",
+      "labels": ["enhancement"]
+    },
+    {
+      "title": "## 🐛 Fixes",
+      "labels": ["bug"]
+    }
+  ]
+}
